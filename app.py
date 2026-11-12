@@ -36,7 +36,7 @@ def init_db():
         )
     ''')
     
-    # Settings Table
+    # Settings Table (Pricing aur Config ke liye)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
@@ -89,7 +89,15 @@ def create_order():
     data = request.json
     mobile = data.get('mobile')
     quantity = int(data.get('quantity', 1))
-    price_per_item = 200  # Default price
+    
+    # Database se current price fetch karna (default 200 agar set na ho)
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT value FROM settings WHERE key = 'base_price'")
+    row = cursor.fetchone()
+    conn.close()
+    
+    price_per_item = int(row['value']) if row else 200
     total_amount = quantity * price_per_item
 
     # Stock check
@@ -187,6 +195,25 @@ def get_admin_orders():
     
     orders = [dict(row) for row in rows]
     return jsonify(orders)
+
+# 6. API: Admin dwara Pricing update karne ke liye (Naya Joda Gaya Route)
+@app.route('/api/admin/update-pricing', methods=['POST'])
+def update_pricing():
+    data = request.json
+    base_price = data.get('base_price', '200')
+    coupon_code = data.get('coupon_code', 'TSM10')
+    discount_amt = data.get('discount_amt', '20')
+
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    cursor.execute("REPLACE INTO settings (key, value) VALUES ('base_price', ?)", (base_price,))
+    cursor.execute("REPLACE INTO settings (key, value) VALUES ('coupon_code', ?)", (coupon_code,))
+    cursor.execute("REPLACE INTO settings (key, value) VALUES ('discount_amt', ?)", (discount_amt,))
+    
+    conn.commit()
+    conn.close()
+    return jsonify({"success": True, "message": "Pricing updated successfully!"})
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
