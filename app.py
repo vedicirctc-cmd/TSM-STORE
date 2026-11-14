@@ -120,8 +120,7 @@ def create_order():
     conn.close()
 
     # Pay0 Checkout URL Simulation/Generation
-    pay0_payment_url = f"https://pay0.co/pay?order_id={order_id}&amount={total_amount}"
-
+   pay0_payment_url = f"https://pay0.shop/paylink?link=4365&amt={total_amount}"
     return jsonify({
         "success": True,
         "order_id": order_id,
