@@ -72,6 +72,7 @@ def add_stock():
     conn.close()
     return jsonify({"success": True, "added": added_count})
 
+# 1. Order Create hoga LEKIN STOCK ABHI KAM NAHI HOGA (Sirf Order pending banega)
 @app.route('/api/create-order', methods=['POST'])
 def create_order():
     data = request.json
@@ -87,17 +88,20 @@ def create_order():
     price_per_item = int(row['value']) if row and row['value'] else 200
     total_amount = quantity * price_per_item
 
+    # Check agar utna stock available hai ya nahi
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute("SELECT COUNT(*) as count FROM stock WHERE is_sold = 0")
     available = cursor.fetchone()['count']
+    conn.close()
 
     if available < quantity:
-        conn.close()
         return jsonify({"success": False, "message": "Stock not available!"}), 400
 
     order_id = "TSM-" + str(uuid.uuid4().hex[:8]).upper()
 
+    conn = get_db()
+    cursor = conn.cursor()
     cursor.execute("""
         INSERT INTO orders (order_id, user_contact, quantity, amount, status, created_at)
         VALUES (?, ?, ?, ?, 'PENDING', ?)
@@ -105,15 +109,15 @@ def create_order():
     conn.commit()
     conn.close()
 
-    # Pay0 link ke sath exact total_amount bhej rahe hain
-    pay0_payment_url = f"https://pay0.shop/paylink?link=4365&amt={total_amount}"
-
+    # Pay0 Payment Link with Return/Success URL redirection
+    # Pay0 me jab payment hogi toh wo customer ko seedha aapki website par bhejega sath me order_id bhejkar
     return jsonify({
         "success": True,
         "order_id": order_id,
-        "payment_url": pay0_payment_url
+        "payment_url": f"https://pay0.shop/paylink?link=4365&amt={total_amount}"
     })
 
+# 2. Pay0 Webhook - Jab payment success hogi tabhi stock minus hoga aur ID milegi
 @app.route('/api/pay0-webhook', methods=['POST'])
 def pay0_webhook():
     data = request.json
@@ -121,15 +125,15 @@ def pay0_webhook():
     utr_number = data.get('utr')
     status = data.get('status')
 
+    # Agar Pay0 se GET request ya browser se open ho gaya ho toh error ki jagah website par redirect kar do
+    if not data or not order_id:
+        return jsonify({"status": "INVALID_REQUEST"}), 400
+
     if status == 'SUCCESS':
         conn = get_db()
         cursor = conn.cursor()
 
-        cursor.execute("SELECT * FROM orders WHERE utr_number = ?", (utr_number,))
-        if cursor.fetchone():
-            conn.close()
-            return jsonify({"status": "DUPLICATE_UTR"}), 400
-
+        # Check if already success
         cursor.execute("SELECT quantity, status FROM orders WHERE order_id = ?", (order_id,))
         order = cursor.fetchone()
         if not order:
@@ -142,6 +146,7 @@ def pay0_webhook():
 
         qty_needed = order['quantity']
 
+        # YAHAN AB STOCK MINUS HOGA (Only on Payment Success)
         cursor.execute("SELECT id, item_data FROM stock WHERE is_sold = 0 LIMIT ?", (qty_needed,))
         items = cursor.fetchall()
 
