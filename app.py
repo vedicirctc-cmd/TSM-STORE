@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, redirect
 from flask_cors import CORS
 import sqlite3
 import uuid
@@ -72,7 +72,6 @@ def add_stock():
     conn.close()
     return jsonify({"success": True, "added": added_count})
 
-# 1. Order Create hoga LEKIN STOCK ABHI KAM NAHI HOGA (Sirf Order pending banega)
 @app.route('/api/create-order', methods=['POST'])
 def create_order():
     data = request.json
@@ -88,7 +87,6 @@ def create_order():
     price_per_item = int(row['value']) if row and row['value'] else 200
     total_amount = quantity * price_per_item
 
-    # Check agar utna stock available hai ya nahi
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute("SELECT COUNT(*) as count FROM stock WHERE is_sold = 0")
@@ -109,67 +107,74 @@ def create_order():
     conn.commit()
     conn.close()
 
-    # Pay0 Payment Link with Return/Success URL redirection
-    # Pay0 me jab payment hogi toh wo customer ko seedha aapki website par bhejega sath me order_id bhejkar
     return jsonify({
         "success": True,
         "order_id": order_id,
         "payment_url": f"https://pay0.shop/paylink?link=4365&amt={total_amount}"
     })
 
-# 2. Pay0 Webhook - Jab payment success hogi tabhi stock minus hoga aur ID milegi
-@app.route('/api/pay0-webhook', methods=['POST'])
+# Helper function jo payment success hone par stock deduct karega
+def process_successful_payment(order_id, utr_number):
+    conn = get_db()
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT quantity, status FROM orders WHERE order_id = ?", (order_id,))
+    order = cursor.fetchone()
+    if not order:
+        conn.close()
+        return False, "ORDER_NOT_FOUND"
+
+    if order['status'] == 'SUCCESS':
+        conn.close()
+        return True, "ALREADY_SUCCESS"
+
+    qty_needed = order['quantity']
+
+    cursor.execute("SELECT id, item_data FROM stock WHERE is_sold = 0 LIMIT ?", (qty_needed,))
+    items = cursor.fetchall()
+
+    if len(items) < qty_needed:
+        conn.close()
+        return False, "OUT_OF_STOCK"
+
+    delivered_items = []
+    for item in items:
+        cursor.execute("UPDATE stock SET is_sold = 1 WHERE id = ?", (item['id'],))
+        delivered_items.append(item['item_data'])
+
+    delivered_string = "\n".join(delivered_items)
+
+    cursor.execute("""
+        UPDATE orders 
+        SET status = 'SUCCESS', utr_number = ?, delivered_item = ? 
+        WHERE order_id = ?
+    """, (utr_number or "AUTO-VERIFIED", delivered_string, order_id))
+
+    conn.commit()
+    conn.close()
+    return True, "DELIVERED"
+
+# Pay0 Webhook (Supports both POST and GET redirects)
+@app.route('/api/pay0-webhook', methods=['GET', 'POST'])
 def pay0_webhook():
-    data = request.json
-    order_id = data.get('order_id')
-    utr_number = data.get('utr')
+    # Agar Pay0 redirect karke GET request bhejta hai ya user browser me kholta hai
+    if request.method == 'GET':
+        order_id = request.args.get('order_id') or request.args.get('order')
+        utr = request.args.get('utr') or request.args.get('txid') or "PAY0-PAID"
+        if order_id:
+            process_successful_payment(order_id, utr)
+            return redirect(f"https://tatkalsupermaster.shop/index.html?order_id={order_id}")
+        return redirect("https://tatkalsupermaster.shop/index.html")
+
+    # POST Webhook from Pay0 server
+    data = request.json or request.form
+    order_id = data.get('order_id') or data.get('order')
+    utr_number = data.get('utr') or data.get('txid')
     status = data.get('status')
 
-    # Agar Pay0 se GET request ya browser se open ho gaya ho toh error ki jagah website par redirect kar do
-    if not data or not order_id:
-        return jsonify({"status": "INVALID_REQUEST"}), 400
-
-    if status == 'SUCCESS':
-        conn = get_db()
-        cursor = conn.cursor()
-
-        # Check if already success
-        cursor.execute("SELECT quantity, status FROM orders WHERE order_id = ?", (order_id,))
-        order = cursor.fetchone()
-        if not order:
-            conn.close()
-            return jsonify({"status": "ORDER_NOT_FOUND"}), 404
-
-        if order['status'] == 'SUCCESS':
-            conn.close()
-            return jsonify({"status": "ALREADY_SUCCESS"}), 200
-
-        qty_needed = order['quantity']
-
-        # YAHAN AB STOCK MINUS HOGA (Only on Payment Success)
-        cursor.execute("SELECT id, item_data FROM stock WHERE is_sold = 0 LIMIT ?", (qty_needed,))
-        items = cursor.fetchall()
-
-        if len(items) < qty_needed:
-            conn.close()
-            return jsonify({"status": "OUT_OF_STOCK"}), 400
-
-        delivered_items = []
-        for item in items:
-            cursor.execute("UPDATE stock SET is_sold = 1 WHERE id = ?", (item['id'],))
-            delivered_items.append(item['item_data'])
-
-        delivered_string = "\n".join(delivered_items)
-
-        cursor.execute("""
-            UPDATE orders 
-            SET status = 'SUCCESS', utr_number = ?, delivered_item = ? 
-            WHERE order_id = ?
-        """, (utr_number, delivered_string, order_id))
-
-        conn.commit()
-        conn.close()
-        return jsonify({"status": "DELIVERED", "order_id": order_id}), 200
+    if status == 'SUCCESS' or data.get('success') == True:
+        success, msg = process_successful_payment(order_id, utr_number)
+        return jsonify({"status": msg, "order_id": order_id}), 200
 
     return jsonify({"status": "FAILED"}), 400
 
