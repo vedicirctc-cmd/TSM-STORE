@@ -5,9 +5,8 @@ import uuid
 import datetime
 import os
 
-# Sabse pehle 'app' ko yahan initialize karna zaroori hai
 app = Flask(__name__)
-CORS(app)
+CORS(app)  # Frontend aur Admin dashboard ko connect karne ke liye
 
 # Database Initialization
 def init_db():
@@ -120,7 +119,7 @@ def create_order():
     conn.commit()
     conn.close()
 
-    # Aapka asli Pay0 Checkout URL
+    # Pay0 Checkout URL with correct link and amount
     pay0_payment_url = f"https://pay0.shop/paylink?link=4365&amt={total_amount}"
 
     return jsonify({
@@ -215,6 +214,42 @@ def update_pricing():
     conn.commit()
     conn.close()
     return jsonify({"success": True, "message": "Pricing updated successfully!"})
+
+# 7. API: Frontend ke liye Live Pricing & Settings fetch karne ke liye
+@app.route('/api/settings', methods=['GET'])
+def get_settings():
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT key, value FROM settings")
+    rows = cursor.fetchall()
+    conn.close()
+    
+    settings = {row['key']: row['value'] for row in rows}
+    return jsonify({
+        "base_price": int(settings.get('base_price', 200)),
+        "coupon_code": settings.get('coupon_code', 'TSM10'),
+        "discount_amt": int(settings.get('discount_amt', 20))
+    })
+
+# 8. API: Admin ke liye saara stock dekhne ke liye (Stock Management)
+@app.route('/api/admin/stocks', methods=['GET'])
+def get_admin_stocks():
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM stock ORDER BY id DESC LIMIT 100")
+    rows = cursor.fetchall()
+    conn.close()
+    return jsonify([dict(row) for row in rows])
+
+# 9. API: Admin dwara specific stock delete karne ke liye
+@app.route('/api/admin/delete-stock/<int:stock_id>', methods=['DELETE'])
+def delete_stock(stock_id):
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM stock WHERE id = ?", (stock_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({"success": True})
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
