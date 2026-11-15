@@ -4,9 +4,13 @@ import sqlite3
 import uuid
 import datetime
 import os
+import requests
 
 app = Flask(__name__)
 CORS(app)
+
+# Apni Pay0 API Key yahan dalein (Agar Pay0 dashboard me API section me mili ho)
+PAY0_API_KEY = os.environ.get("PAY0_API_KEY", "")
 
 def init_db():
     conn = sqlite3.connect('store.db')
@@ -107,14 +111,17 @@ def create_order():
     conn.commit()
     conn.close()
 
+    # Pay0 Payment Link (Customer payment ke baad success.html par jayega)
+    return_url = f"https://tatkalsupermaster.shop/success.html?order_id={order_id}"
+    pay0_payment_url = f"https://pay0.shop/paylink?link=4365&amt={total_amount}&order_id={order_id}&redirect_url={return_url}"
+
     return jsonify({
         "success": True,
         "order_id": order_id,
-        "payment_url": f"https://pay0.shop/paylink?link=4365&amt={total_amount}"
+        "payment_url": pay0_payment_url
     })
 
-# Helper function jo payment success hone par stock deduct karega
-def process_successful_payment(order_id, utr_number):
+def deliver_stock_for_order(order_id, utr_number):
     conn = get_db()
     cursor = conn.cursor()
 
@@ -129,7 +136,6 @@ def process_successful_payment(order_id, utr_number):
         return True, "ALREADY_SUCCESS"
 
     qty_needed = order['quantity']
-
     cursor.execute("SELECT id, item_data FROM stock WHERE is_sold = 0 LIMIT ?", (qty_needed,))
     items = cursor.fetchall()
 
@@ -148,35 +154,56 @@ def process_successful_payment(order_id, utr_number):
         UPDATE orders 
         SET status = 'SUCCESS', utr_number = ?, delivered_item = ? 
         WHERE order_id = ?
-    """, (utr_number or "AUTO-VERIFIED", delivered_string, order_id))
+    """, (utr_number, delivered_string, order_id))
 
     conn.commit()
     conn.close()
     return True, "DELIVERED"
 
-# Pay0 Webhook (Supports both POST and GET redirects)
+# ASLI PAY0 WEBHOOK (Sirf Pay0 ke server se aane wali request hi order ko SUCCESS karegi)
 @app.route('/api/pay0-webhook', methods=['GET', 'POST'])
 def pay0_webhook():
-    # Agar Pay0 redirect karke GET request bhejta hai ya user browser me kholta hai
     if request.method == 'GET':
         order_id = request.args.get('order_id') or request.args.get('order')
-        utr = request.args.get('utr') or request.args.get('txid') or "PAY0-PAID"
-        if order_id:
-            process_successful_payment(order_id, utr)
-            return redirect(f"https://tatkalsupermaster.shop/index.html?order_id={order_id}")
-        return redirect("https://tatkalsupermaster.shop/index.html")
+        status = request.args.get('status')
+        utr = request.args.get('utr') or request.args.get('txid') or "PAY0-VERIFIED"
+        if order_id and status == 'SUCCESS':
+            deliver_stock_for_order(order_id, utr)
+        return redirect(f"https://tatkalsupermaster.shop/success.html?order_id={order_id or ''}")
 
-    # POST Webhook from Pay0 server
-    data = request.json or request.form
+    # Server-to-Server POST Webhook from Pay0
+    data = request.json or request.form or {}
     order_id = data.get('order_id') or data.get('order')
-    utr_number = data.get('utr') or data.get('txid')
-    status = data.get('status')
+    utr_number = str(data.get('utr') or data.get('txid') or data.get('bank_txnid') or "").strip()
+    status = str(data.get('status') or "").upper()
 
-    if status == 'SUCCESS' or data.get('success') == True:
-        success, msg = process_successful_payment(order_id, utr_number)
+    if status in ['SUCCESS', 'COMPLETED', 'PAID'] and order_id:
+        success, msg = deliver_stock_for_order(order_id, utr_number or "PAY0-AUTO")
         return jsonify({"status": msg, "order_id": order_id}), 200
 
-    return jsonify({"status": "FAILED"}), 400
+    return jsonify({"status": "IGNORED"}), 200
+
+# Customer ke liye Order Status Check API (Sirf READ-ONLY, isse fake UTR se ID nahi milegi)
+@app.route('/api/order-status/<order_id>', methods=['GET'])
+def check_order_status(order_id):
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT order_id, quantity, amount, status, utr_number, delivered_item FROM orders WHERE order_id = ? OR utr_number = ?", (order_id.upper(), order_id.upper()))
+    order = cursor.fetchone()
+    conn.close()
+
+    if not order:
+        return jsonify({"found": False, "message": "Order not found"}), 404
+
+    return jsonify({
+        "found": True,
+        "order_id": order['order_id'],
+        "quantity": order['quantity'],
+        "amount": order['amount'],
+        "status": order['status'],
+        "utr_number": order['utr_number'],
+        "delivered_item": order['delivered_item'] if order['status'] == 'SUCCESS' else None
+    })
 
 @app.route('/api/admin/orders', methods=['GET'])
 def get_admin_orders():
@@ -186,6 +213,15 @@ def get_admin_orders():
     rows = cursor.fetchall()
     conn.close()
     return jsonify([dict(row) for row in rows])
+
+# Admin ke liye Manual Approve Button (Agar kisi customer ki payment aayi ho aur webhook miss ho jaye toh sirf Admin approve kar sake)
+@app.route('/api/admin/approve-order', methods=['POST'])
+def admin_approve_order():
+    data = request.json
+    order_id = data.get('order_id')
+    utr = data.get('utr', 'ADMIN-APPROVED')
+    success, msg = deliver_stock_for_order(order_id, utr)
+    return jsonify({"success": success, "message": msg})
 
 @app.route('/api/admin/update-pricing', methods=['POST'])
 def update_pricing():
